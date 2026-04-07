@@ -68,6 +68,51 @@ def xyz_to_rgb(xyz):
 def delta_e_cie76(l1, l2):
     return math.sqrt(sum((a-b)**2 for a, b in zip(l1, l2)))
 
+# ── WCAG 2.1 ────────────────────────────────────────────────────────────────
+
+def luminancia_relativa(hex_cor):
+    """Luminância relativa WCAG 2.1 (0–1) conforme IEC 61966-2-1."""
+    rgb = hex_to_rgb(hex_cor)
+    canais = []
+    for c in rgb:
+        v = c / 255.0
+        canais.append(v / 12.92 if v <= 0.03928 else pow((v + 0.055) / 1.055, 2.4))
+    return 0.2126 * canais[0] + 0.7152 * canais[1] + 0.0722 * canais[2]
+
+def razao_contraste(hex_a, hex_b):
+    """Razão de contraste WCAG entre duas cores (1:1 a 21:1)."""
+    la = luminancia_relativa(hex_a)
+    lb = luminancia_relativa(hex_b)
+    lighter, darker = max(la, lb), min(la, lb)
+    return (lighter + 0.05) / (darker + 0.05)
+
+def nivel_wcag(razao, tamanho="normal"):
+    """
+    Retorna o nível WCAG atingido para texto sobre fundo.
+    tamanho: 'normal'  → limites 4.5 (AA) e 7.0 (AAA)
+             'grande'  → limites 3.0 (AA) e 4.5 (AAA)  [≥18pt ou ≥14pt bold]
+             'ui'      → limite  3.0 (AA) apenas         [componentes de UI]
+    Retorna: 'AAA', 'AA', 'AA-grande' (passa só para texto grande) ou 'Falha'.
+    """
+    if tamanho == "normal":
+        if razao >= 7.0:  return "AAA"
+        if razao >= 4.5:  return "AA"
+        return "Falha"
+    elif tamanho == "grande":
+        if razao >= 4.5:  return "AAA"
+        if razao >= 3.0:  return "AA"
+        return "Falha"
+    else:  # ui
+        return "AA" if razao >= 3.0 else "Falha"
+
+# Cores fixas dos badges — independentes do tema, para máxima legibilidade
+_WCAG_CORES = {
+    "AAA":       {"bg": "#1b5e20", "fg": "#ffffff"},
+    "AA":        {"bg": "#1565c0", "fg": "#ffffff"},
+    "AA-grande": {"bg": "#e65100", "fg": "#ffffff"},
+    "Falha":     {"bg": "#b71c1c", "fg": "#ffffff"},
+}
+
 def kelvin_to_rgb(kelvin):
     temp = kelvin / 100
     if temp <= 66:
@@ -209,6 +254,8 @@ class AppCores:
         self.config_win = None
         self.historico_cores = []  # Últimas 10 cores usadas
         self.mostrar_preview_contraste = tk.BooleanVar(value=True)  # Controle do preview "Aa"
+        self.mostrar_wcag = tk.BooleanVar(value=True)               # Badge WCAG no canvas
+        self.wcag_fundo_var = tk.StringVar(value="preto_branco")    # Fundo de referência WCAG
         self.ultima_atividade = ""  # Memória da última atividade realizada
         
         # Ajustes de Imagem
@@ -239,6 +286,7 @@ class AppCores:
         self.btn_gotas = tk.Button(self.frame_menu, text="🧪 Conta-Gotas", command=self.ferramenta_conta_gotas, width=12)
         self.btn_gotas.pack(side=tk.LEFT, padx=10)
         tk.Button(self.frame_menu, text="🎡 Harmonias", command=self.abrir_harmonias, width=12).pack(side=tk.LEFT, padx=10)
+        tk.Button(self.frame_menu, text="🧬 Mixer", command=self.abrir_mixer, width=10).pack(side=tk.LEFT, padx=10)
         tk.Button(self.frame_menu, text="📷 Importar", command=self.importar_imagem, width=12).pack(side=tk.LEFT, padx=10)
         tk.Button(self.frame_menu, text="💾 Exportar", command=self.exportar_paleta, width=12).pack(side=tk.LEFT, padx=10)
         tk.Button(self.frame_menu, text="⚙️ Config", command=self.abrir_configuracoes, width=12).pack(side=tk.RIGHT, padx=10)
@@ -281,6 +329,8 @@ class AppCores:
                 "matiz": self.adj_hue.get(),
                 "temperatura": self.adj_temp.get(),
                 "mostrar_preview_contraste": self.mostrar_preview_contraste.get(),
+                "mostrar_wcag": self.mostrar_wcag.get(),
+                "wcag_fundo": self.wcag_fundo_var.get(),
                 "ultima_atividade": self.ultima_atividade,
                 "ultima_cor": self.cor_atual
             }
@@ -304,6 +354,8 @@ class AppCores:
                     self.adj_hue.set(data.get("matiz", 0))
                     self.adj_temp.set(data.get("temperatura", 6500))
                     self.mostrar_preview_contraste.set(data.get("mostrar_preview_contraste", True))
+                    self.mostrar_wcag.set(data.get("mostrar_wcag", True))
+                    self.wcag_fundo_var.set(data.get("wcag_fundo", "preto_branco"))
                     self.ultima_atividade = data.get("ultima_atividade", "")
                     self.cor_atual = data.get("ultima_cor", "#0078d7")
             except Exception as e:
@@ -361,8 +413,57 @@ class AppCores:
         tk.Label(self.config_container, text="TEMA", font=("Arial", 11, "bold")).pack(pady=10)
         tk.Radiobutton(self.config_container, text="Claro", variable=self.tema, value="claro", command=self.aplicar_tema).pack(pady=5)
         tk.Radiobutton(self.config_container, text="Escuro", variable=self.tema, value="escuro", command=self.aplicar_tema).pack(pady=5)
+
         tk.Label(self.config_container, text="OPÇÕES DE EXIBIÇÃO", font=("Arial", 11, "bold")).pack(pady=(20, 10))
-        tk.Checkbutton(self.config_container, text="Mostrar preview de contraste (Aa)", variable=self.mostrar_preview_contraste, command=self.desenhar_gradiente).pack(pady=5)
+        tk.Checkbutton(self.config_container, text="Mostrar preview de contraste (Aa)",
+                       variable=self.mostrar_preview_contraste,
+                       command=self.desenhar_gradiente).pack(pady=5)
+        tk.Checkbutton(self.config_container, text="Mostrar badge WCAG no canvas",
+                       variable=self.mostrar_wcag,
+                       command=self.desenhar_gradiente).pack(pady=5)
+
+        tk.Label(self.config_container, text="FUNDO DE REFERÊNCIA WCAG",
+                 font=("Arial", 11, "bold")).pack(pady=(20, 6))
+        tk.Label(self.config_container,
+                 text="Qual cor usar como fundo ao calcular\na razão de contraste de cada swatch:",
+                 font=("Arial", 8), justify=tk.CENTER).pack()
+
+        for texto, valor in [
+            ("Melhor entre branco e preto (padrão)", "preto_branco"),
+            ("Branco (#ffffff)", "branco"),
+            ("Preto (#000000)", "preto"),
+        ]:
+            tk.Radiobutton(self.config_container, text=texto,
+                           variable=self.wcag_fundo_var, value=valor,
+                           command=self.desenhar_gradiente).pack(anchor=tk.W, padx=60, pady=2)
+
+        # Fundo customizado
+        frame_custom = tk.Frame(self.config_container)
+        frame_custom.pack(pady=(6, 2))
+        tk.Label(frame_custom, text="Cor customizada:").pack(side=tk.LEFT, padx=4)
+        self._wcag_custom_hex = tk.StringVar(
+            value=self.wcag_fundo_var.get()
+                  if self.wcag_fundo_var.get().startswith("#") else "#ffffff")
+        entry_custom = tk.Entry(frame_custom, textvariable=self._wcag_custom_hex,
+                                width=9, font=("Courier", 10))
+        entry_custom.pack(side=tk.LEFT, padx=2)
+
+        def aplicar_custom(*_):
+            val = self._wcag_custom_hex.get().strip()
+            if not val.startswith("#"):
+                val = "#" + val
+            val = val[:7]
+            try:
+                hex_to_rgb(val)
+                self.wcag_fundo_var.set(val)
+                self.desenhar_gradiente()
+            except Exception:
+                pass
+
+        tk.Button(frame_custom, text="Aplicar", command=aplicar_custom,
+                  font=("Arial", 8)).pack(side=tk.LEFT, padx=4)
+        entry_custom.bind("<Return>", aplicar_custom)
+
         self.aplicar_tema()
 
     def tela_ajustes(self):
@@ -724,6 +825,352 @@ class AppCores:
         win.after(50, atualizar_tudo)
         canvas_grad.bind("<Configure>", lambda e: atualizar_tudo())
 
+    # ── MIXER DE CORES PERCEPTUAL ────────────────────────────────────────────
+
+    def abrir_mixer(self):
+        """Mixer de cores com interpolação perceptual em LAB, LCH e RGB."""
+        win = tk.Toplevel(self.root)
+        win.title("Mixer de Cores Perceptual")
+        win.geometry("680x580")
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        p   = self.paletas[self.tema.get()]
+        win.config(bg=p["window_bg"])
+
+        BG  = p["window_bg"]
+        FG  = p["text_fg"]
+        BTN = p["btn"]
+
+        # ── Estado ───────────────────────────────────────────────────────────
+        cor_a_var  = tk.StringVar(value=self.cor_atual)
+        cor_b_var  = tk.StringVar(value="#ffffff")
+        t_var      = tk.DoubleVar(value=0.5)
+        passos_var = tk.IntVar(value=7)
+        modo_var   = tk.StringVar(value="LAB")
+        _cache     = {}
+
+        # ── Funções de interpolação ──────────────────────────────────────────
+
+        def interp_lab(ha, hb, t):
+            la = xyz_to_lab(rgb_to_xyz(hex_to_rgb(ha)))
+            lb = xyz_to_lab(rgb_to_xyz(hex_to_rgb(hb)))
+            lm = tuple(la[j] + (lb[j] - la[j]) * t for j in range(3))
+            return rgb_to_hex(xyz_to_rgb(lab_to_xyz(lm)))
+
+        def interp_lch(ha, hb, t):
+            la = lab_to_lch(xyz_to_lab(rgb_to_xyz(hex_to_rgb(ha))))
+            lb = lab_to_lch(xyz_to_lab(rgb_to_xyz(hex_to_rgb(hb))))
+            L  = la[0] + (lb[0] - la[0]) * t
+            C  = la[1] + (lb[1] - la[1]) * t
+            dH = lb[2] - la[2]
+            if dH >  180: dH -= 360
+            if dH < -180: dH += 360
+            H  = (la[2] + dH * t) % 360
+            return lch_para_hex((L, C, H))
+
+        def interp_rgb(ha, hb, t):
+            ra, ga, ba = hex_to_rgb(ha)
+            rb, gb, bb = hex_to_rgb(hb)
+            return rgb_to_hex([ra+(rb-ra)*t, ga+(gb-ga)*t, ba+(bb-ba)*t])
+
+        _interp_fn = {"LAB": interp_lab, "LCH": interp_lch, "RGB": interp_rgb}
+
+        def gerar_escala(ha, hb, n, modo):
+            fn = _interp_fn[modo]
+            return [fn(ha, hb, i / max(n-1, 1)) for i in range(n)]
+
+        # ── Renderização (definida antes da UI para que os widgets possam referenciá-la) ──
+
+        # Estes labels/canvas serão atribuídos abaixo e usados aqui via closure
+        _refs = {}  # guarda referências mutáveis aos widgets criados depois
+
+        def desenhar_gradiente_mixer(cores):
+            cv = _refs.get("canvas_grad")
+            if not cv or not cores:
+                return
+            cv.update_idletasks()
+            cw, ch = cv.winfo_width(), 70
+            if cw < 2:
+                return
+            cv.delete("all")
+            lf = cw / len(cores)
+            for idx, cor in enumerate(cores):
+                try:
+                    cv.create_rectangle(idx*lf, 0, (idx+1)*lf, ch, fill=cor, outline=cor)
+                    if lf > 46:
+                        cv.create_text(idx*lf + lf/2, ch/2,
+                                       text=cor.upper(),
+                                       fill=cor_texto_contraste(cor),
+                                       font=("Courier", 7, "bold"))
+                except Exception:
+                    pass
+
+        def desenhar_swatches_mixer(cores):
+            fs = _refs.get("frame_swatches")
+            if not fs:
+                return
+            for w in fs.winfo_children():
+                w.destroy()
+            row = tk.Frame(fs, bg=BG)
+            row.pack(fill=tk.X)
+            for cor in cores:
+                try:
+                    f = tk.Frame(row, bg=BG)
+                    f.pack(side=tk.LEFT, padx=3)
+                    sw = tk.Label(f, bg=cor, width=4, height=2,
+                                  relief=tk.FLAT, cursor="hand2")
+                    sw.pack()
+                    tk.Label(f, text=cor.upper(), bg=BG, fg=FG,
+                             font=("Courier", 7)).pack()
+
+                    def copiar(c=cor):
+                        win.clipboard_clear()
+                        win.clipboard_append(c)
+                        self.label_info.config(text=f"Copiado: {c}", fg="#2196f3")
+
+                    sw.bind("<Button-1>", lambda e, c=cor: copiar(c))
+                    sw.bind("<Double-Button-1>",
+                            lambda e, c=cor: [self.gerar_lista_cores(c), win.destroy()])
+                except Exception:
+                    pass
+
+        def atualizar(*_):
+            ha = cor_a_var.get().strip()
+            hb = cor_b_var.get().strip()
+            if not ha.startswith("#"): ha = "#" + ha
+            if not hb.startswith("#"): hb = "#" + hb
+            ha, hb = ha[:7], hb[:7]
+            try:
+                hex_to_rgb(ha)
+                hex_to_rgb(hb)
+            except Exception:
+                return
+
+            t    = t_var.get()
+            modo = modo_var.get()
+            n    = passos_var.get()
+
+            fn    = _interp_fn[modo]
+            cor_t = fn(ha, hb, t)
+            _cache["cor_t"] = cor_t
+
+            escala = gerar_escala(ha, hb, n, modo)
+            _cache["escala"] = escala
+
+            lbl = _refs.get("lbl_t_hex")
+            prt = _refs.get("prev_t")
+            if lbl:
+                try: lbl.config(text=cor_t.upper())
+                except Exception: pass
+            if prt:
+                try: prt.config(bg=cor_t)
+                except Exception: pass
+
+            desenhar_gradiente_mixer(escala)
+            desenhar_swatches_mixer(escala)
+
+        # ── UI — construída DEPOIS de atualizar estar definida ────────────────
+
+        # Seleção de cores A e B
+        frame_cores = tk.Frame(win, bg=BG, pady=12)
+        frame_cores.pack(fill=tk.X, padx=20)
+
+        def bloco_cor(parent, var, rotulo):
+            f = tk.Frame(parent, bg=BG)
+            f.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=8)
+            tk.Label(f, text=rotulo, bg=BG, fg=FG,
+                     font=("Arial", 10, "bold")).pack(anchor=tk.W)
+            linha = tk.Frame(f, bg=BG)
+            linha.pack(fill=tk.X, pady=4)
+
+            entry = tk.Entry(linha, textvariable=var, width=9, font=("Courier", 11))
+            entry.pack(side=tk.LEFT)
+
+            prev_lbl = tk.Label(linha, width=3, height=1, bg=var.get(), relief=tk.FLAT)
+            prev_lbl.pack(side=tk.LEFT, padx=6)
+
+            def pick_seletor():
+                c = colorchooser.askcolor(title=f"Escolher {rotulo}",
+                                          color=var.get(), parent=win)[1]
+                if c:
+                    var.set(c)
+                    atualizar()
+
+            def pick_historico():
+                if not self.historico_cores:
+                    return
+                pop = tk.Toplevel(win)
+                pop.title("Histórico")
+                pop.attributes("-topmost", True)
+                pop.config(bg=BG)
+                pop.geometry("240x70")
+                for cor in self.historico_cores[:10]:
+                    tk.Button(
+                        pop, bg=cor, width=2, height=1,
+                        relief=tk.FLAT, cursor="hand2",
+                        command=lambda c=cor: [var.set(c), pop.destroy(), atualizar()]
+                    ).pack(side=tk.LEFT, padx=2, pady=12)
+
+            tk.Button(linha, text="🎨", bg=BTN, fg=FG,
+                      relief=tk.FLAT, command=pick_seletor).pack(side=tk.LEFT, padx=2)
+            tk.Button(linha, text="🕐", bg=BTN, fg=FG,
+                      relief=tk.FLAT, command=pick_historico).pack(side=tk.LEFT, padx=2)
+
+            def on_entry(*_):
+                val = var.get().strip()
+                if not val.startswith("#"): val = "#" + val
+                val = val[:7]
+                try:
+                    hex_to_rgb(val)
+                    var.set(val)
+                    prev_lbl.config(bg=val)
+                    atualizar()
+                except Exception:
+                    pass
+
+            entry.bind("<Return>",   on_entry)
+            entry.bind("<FocusOut>", on_entry)
+            var.trace_add("write", lambda *_: (
+                prev_lbl.config(bg=var.get())
+                if var.get().startswith("#") and len(var.get()) == 7 else None
+            ))
+
+        bloco_cor(frame_cores, cor_a_var, "Cor A")
+        bloco_cor(frame_cores, cor_b_var, "Cor B")
+
+        # Modo de interpolação
+        frame_modo = tk.Frame(win, bg=BG)
+        frame_modo.pack(fill=tk.X, padx=20, pady=(0, 4))
+        tk.Label(frame_modo, text="Modo:", bg=BG, fg=FG,
+                 font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=(0, 8))
+        for m in ("LAB", "LCH", "RGB"):
+            tk.Radiobutton(frame_modo, text=m, variable=modo_var, value=m,
+                           bg=BG, fg=FG, selectcolor=BG,
+                           font=("Arial", 9),
+                           command=atualizar).pack(side=tk.LEFT, padx=8)
+        tk.Label(frame_modo,
+                 text="LAB = luminosidade uniforme  ·  LCH = matiz suave  ·  RGB = linear",
+                 bg=BG, fg="#888888", font=("Arial", 7, "italic")).pack(side=tk.LEFT, padx=10)
+
+        # Slider t
+        frame_t = tk.Frame(win, bg=BG)
+        frame_t.pack(fill=tk.X, padx=20, pady=4)
+        tk.Label(frame_t, text="Mistura (t):", bg=BG, fg=FG,
+                 font=("Arial", 9)).pack(side=tk.LEFT)
+        tk.Scale(frame_t, from_=0.0, to=1.0, resolution=0.01,
+                 orient=tk.HORIZONTAL, variable=t_var,
+                 bg=BG, fg=FG, highlightthickness=0,
+                 troughcolor=p["canvas"], length=320,
+                 command=lambda _: atualizar()).pack(side=tk.LEFT, padx=6)
+        lbl_t_hex = tk.Label(frame_t, text="", bg=BG, fg=FG,
+                             font=("Courier", 10, "bold"), width=8)
+        lbl_t_hex.pack(side=tk.LEFT, padx=4)
+        prev_t = tk.Label(frame_t, width=3, height=1, bg=BG, relief=tk.FLAT)
+        prev_t.pack(side=tk.LEFT, padx=4)
+        _refs["lbl_t_hex"] = lbl_t_hex
+        _refs["prev_t"]    = prev_t
+
+        # Slider de passos
+        frame_passos = tk.Frame(win, bg=BG)
+        frame_passos.pack(fill=tk.X, padx=20, pady=4)
+        tk.Label(frame_passos, text="Passos na escala:", bg=BG, fg=FG,
+                 font=("Arial", 9)).pack(side=tk.LEFT)
+        tk.Scale(frame_passos, from_=2, to=20,
+                 orient=tk.HORIZONTAL, variable=passos_var,
+                 bg=BG, fg=FG, highlightthickness=0,
+                 troughcolor=p["canvas"], length=200,
+                 command=lambda _: atualizar()).pack(side=tk.LEFT, padx=6)
+
+        # Canvas de gradiente
+        frame_grad = tk.Frame(win, bg=BG)
+        frame_grad.pack(fill=tk.X, padx=20, pady=6)
+        tk.Label(frame_grad, text="Escala interpolada:", bg=BG, fg=FG,
+                 font=("Arial", 9, "bold")).pack(anchor=tk.W)
+        canvas_grad = tk.Canvas(frame_grad, height=70, bg=p["canvas"],
+                                highlightthickness=1, highlightbackground=BTN)
+        canvas_grad.pack(fill=tk.X, pady=4)
+        _refs["canvas_grad"] = canvas_grad
+        canvas_grad.bind("<Configure>", lambda e: atualizar())
+
+        # Swatches
+        frame_swatches = tk.Frame(win, bg=BG)
+        frame_swatches.pack(fill=tk.X, padx=20)
+        _refs["frame_swatches"] = frame_swatches
+
+        # Botões de ação
+        frame_acoes = tk.Frame(win, bg=BG, pady=10)
+        frame_acoes.pack(fill=tk.X, padx=20)
+
+        def usar_cor_t():
+            cor = _cache.get("cor_t")
+            if cor:
+                self.gerar_lista_cores(cor)
+                self.label_info.config(
+                    text=f"Mixer → {cor.upper()}  t={t_var.get():.2f}  {modo_var.get()}",
+                    fg="#6a1b9a")
+                win.destroy()
+
+        def usar_escala():
+            cores = _cache.get("escala", [])
+            if cores:
+                self.cores_hex = cores
+                self.cor_atual = cores[len(cores) // 2]
+                self.adicionar_historico(self.cor_atual)
+                self.atualizar_label_info()
+                self.desenhar_gradiente()
+                self.label_info.config(
+                    text=f"Mixer → escala {modo_var.get()}  {len(cores)} passos",
+                    fg="#2e7d32")
+                win.destroy()
+
+        def usar_como_gradiente():
+            ha, hb = cor_a_var.get(), cor_b_var.get()
+            try:
+                hex_to_rgb(ha); hex_to_rgb(hb)
+            except Exception:
+                return
+            lab_a = xyz_to_lab(rgb_to_xyz(hex_to_rgb(ha)))
+            lab_b = xyz_to_lab(rgb_to_xyz(hex_to_rgb(hb)))
+            dist  = delta_e_cie76(lab_a, lab_b)
+            n     = max(4, int(dist / self.passo_delta.get()))
+            cores = [interp_lab(ha, hb, i / max(n-1, 1)) for i in range(n)]
+            self.cores_hex = cores
+            self.cor_atual = ha
+            self.adicionar_historico(ha)
+            self.atualizar_label_info()
+            self.desenhar_gradiente()
+            self.label_info.config(
+                text=f"Mixer → gradiente perceptual  {len(cores)} passos",
+                fg="#1565c0")
+            win.destroy()
+
+        def trocar_cores():
+            a, b = cor_a_var.get(), cor_b_var.get()
+            cor_a_var.set(b); cor_b_var.set(a)
+            atualizar()
+
+        tk.Button(frame_acoes, text="⇄ Trocar A↔B",
+                  command=trocar_cores, bg=BTN, fg=FG,
+                  relief=tk.FLAT, padx=6).pack(side=tk.LEFT, padx=4)
+        tk.Button(frame_acoes, text="✅ Usar cor em t",
+                  command=usar_cor_t,
+                  bg="#c8e6c9", fg="#1b5e20",
+                  font=("Arial", 9, "bold"), relief=tk.FLAT, padx=8).pack(side=tk.LEFT, padx=4)
+        tk.Button(frame_acoes, text="🎨 Usar escala",
+                  command=usar_escala,
+                  bg="#e1bee7", fg="#4a148c",
+                  font=("Arial", 9, "bold"), relief=tk.FLAT, padx=8).pack(side=tk.LEFT, padx=4)
+        tk.Button(frame_acoes, text="🌈 Gradiente suave A→B",
+                  command=usar_como_gradiente,
+                  bg="#bbdefb", fg="#0d47a1",
+                  font=("Arial", 9, "bold"), relief=tk.FLAT, padx=8).pack(side=tk.LEFT, padx=4)
+        tk.Button(frame_acoes, text="✖ Fechar",
+                  command=win.destroy, bg=BTN, fg=FG,
+                  relief=tk.FLAT, padx=8).pack(side=tk.RIGHT, padx=4)
+
+        # Primeiro render após a janela estar visível
+        win.after(80, atualizar)
+
     # FERRAMENTAS 
     def ferramenta_conta_gotas(self):
         self.root.withdraw(); time.sleep(0.2); print_tela = pyautogui.screenshot(); larg_t, alt_t = print_tela.size
@@ -808,6 +1255,47 @@ class AppCores:
                 cx = i * larg_f + larg_f / 2
                 cy = h / 2
                 self.canvas.create_text(cx, cy, text="Aa", fill=txt_cor, font=("Arial", 10, "bold"))
+
+            # ── Badge WCAG ──────────────────────────────────────────────────
+            if self.mostrar_wcag.get() and larg_f > 44:
+                cx = i * larg_f + larg_f / 2
+                fundo = self.wcag_fundo_var.get()
+
+                if fundo == "preto_branco":
+                    # Mostra o melhor nível atingido contra preto ou branco
+                    r_branco = razao_contraste(hex_f, "#ffffff")
+                    r_preto  = razao_contraste(hex_f, "#000000")
+                    melhor_r = max(r_branco, r_preto)
+                    nivel    = nivel_wcag(melhor_r)
+                    rotulo   = f"{nivel}  {melhor_r:.1f}:1"
+                elif fundo == "branco":
+                    r = razao_contraste(hex_f, "#ffffff")
+                    nivel  = nivel_wcag(r)
+                    rotulo = f"{nivel}  {r:.1f}:1"
+                elif fundo == "preto":
+                    r = razao_contraste(hex_f, "#000000")
+                    nivel  = nivel_wcag(r)
+                    rotulo = f"{nivel}  {r:.1f}:1"
+                else:
+                    # Fundo customizado salvo
+                    r = razao_contraste(hex_f, fundo)
+                    nivel  = nivel_wcag(r)
+                    rotulo = f"{nivel}  {r:.1f}:1"
+
+                cores_badge = _WCAG_CORES.get(nivel, _WCAG_CORES["Falha"])
+                pad_x, pad_y = 5, 3
+                txt_w  = max(60, len(rotulo) * 7)
+                txt_h  = 16
+                bx     = cx - txt_w / 2
+                by     = h - 28
+                # Fundo do badge (retângulo arredondado simulado com dois rects + oval)
+                self.canvas.create_rectangle(
+                    bx, by, bx + txt_w, by + txt_h,
+                    fill=cores_badge["bg"], outline="", width=0)
+                self.canvas.create_text(
+                    cx, by + txt_h / 2,
+                    text=rotulo, fill=cores_badge["fg"],
+                    font=("Arial", 8, "bold"), anchor="center")
 
     def adicionar_historico(self, cor):
         if cor in self.historico_cores:
