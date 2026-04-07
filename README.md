@@ -13,7 +13,7 @@ O projeto foca na **fidelidade visual**, utilizando modelos matemáticos que res
 
 ###  Mixer de Cores Perceptual (Espaço LAB)
 Diferente de mixers comuns que geram tons acinzentados ao misturar cores opostas no RGB, o Color Lab Pro realiza a interpolação no espaço de cores **CIELAB**.
-* **Mistura Natural:** Ao converter para as coordenadas $L^*$, $a^*$, $b^*$, o algoritmo preserva a vibração e a luminosidade percebida.
+* **Mistura Natural:** Ao converter para as coordenadas L*(Luminosidade/Lightness), a*(Eixo Verde-Vermelho), b*(Eixo Azul-Amarelo), o algoritmo preserva a vibração e a luminosidade percebida.
 * **Transição Suave:** Ideal para criar paletas e gradientes que parecem "reais" aos olhos humanos, simulando o comportamento físico da luz e pigmentos.
 
 ###  Conformidade e Acessibilidade (WCAG 2.1)
