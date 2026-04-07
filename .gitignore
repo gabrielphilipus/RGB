@@ -1,0 +1,21 @@
+# --- Pastas de Compilação (Lixo do PyInstaller e Nuitka) ---
+build/
+dist/
+RGB3.build/
+RGB3.dist/
+RGB3.onefile-build/
+__pycache__/
+
+# --- Binários e Executáveis ---
+*.exe
+*.dll
+*.bin
+
+# --- Arquivos de Configuração e Logs ---
+*.spec
+*.log
+config.json
+
+# --- Arquivos do Sistema ---
+.DS_Store
+Thumbs.db
