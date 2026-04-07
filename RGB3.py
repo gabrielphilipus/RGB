@@ -257,6 +257,18 @@ class AppCores:
         self.mostrar_wcag = tk.BooleanVar(value=True)               # Badge WCAG no canvas
         self.wcag_fundo_var = tk.StringVar(value="preto_branco")    # Fundo de referência WCAG
         self.ultima_atividade = ""  # Memória da última atividade realizada
+
+        # Projetos/Paletas salvas
+        self.arquivo_projetos = "projetos.json"
+        self.projetos = {}  # {nome: {cores_hex, cor_atual, data_criacao, data_modificacao}}
+        self.projeto_atual = None  # Nome do projeto atualmente carregado
+        self.frame_projetos = None  # Frame do painel lateral
+
+        # Pilha de estados para Undo/Redo
+        self._undo_stack = []  # Pilha de estados para desfazer
+        self._redo_stack = []  # Pilha de estados para refazer
+        self._max_undo_states = 50  # Limite de estados na pilha
+        self._salvando_estado = False  # Flag para evitar salvamento recursivo
         
         # Ajustes de Imagem
         self.adj_bright = tk.DoubleVar(value=0)
@@ -277,6 +289,7 @@ class AppCores:
         }
 
         self.carregar_configuracoes()
+        self.carregar_projetos()
 
         self.frame_menu = tk.Frame(self.root, pady=15)
         self.frame_menu.pack(side=tk.TOP, fill=tk.X)
@@ -289,31 +302,695 @@ class AppCores:
         tk.Button(self.frame_menu, text="🧬 Mixer", command=self.abrir_mixer, width=10).pack(side=tk.LEFT, padx=10)
         tk.Button(self.frame_menu, text="📷 Importar", command=self.importar_imagem, width=12).pack(side=tk.LEFT, padx=10)
         tk.Button(self.frame_menu, text="💾 Exportar", command=self.exportar_paleta, width=12).pack(side=tk.LEFT, padx=10)
+        # Botões de Projetos
+        tk.Button(self.frame_menu, text="💼 Salvar Projeto", command=self.abrir_salvar_projeto, width=14).pack(side=tk.LEFT, padx=10)
+        tk.Button(self.frame_menu, text="📂 Projetos", command=self.abrir_gerenciar_projetos, width=12).pack(side=tk.LEFT, padx=10)
+        # Undo/Redo buttons
+        tk.Button(self.frame_menu, text="↩️ Undo", command=self.undo, width=10).pack(side=tk.RIGHT, padx=5)
+        tk.Button(self.frame_menu, text="↪️ Redo", command=self.redo, width=10).pack(side=tk.RIGHT, padx=5)
         tk.Button(self.frame_menu, text="⚙️ Config", command=self.abrir_configuracoes, width=12).pack(side=tk.RIGHT, padx=10)
 
         self.label_info = tk.Label(self.root, text=f"Color Lab Pro v4.6 | Base: {self.cor_atual}")
         self.label_info.pack()
 
-        # Container principal: canvas + histórico
+        # Container principal: projetos + canvas + histórico
         self.frame_principal = tk.Frame(self.root)
         self.frame_principal.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
 
-        self.canvas = tk.Canvas(self.frame_principal, highlightthickness=0)
-        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Painel lateral de projetos
+        self.frame_projetos = tk.Frame(self.frame_principal, width=180)
+        self.frame_projetos.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+        self.frame_projetos.pack_propagate(False)
+
+        # Painel central (canvas)
+        self.frame_canvas = tk.Frame(self.frame_principal)
+        self.frame_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.canvas = tk.Canvas(self.frame_canvas, highlightthickness=0)
+        self.canvas.pack(fill=tk.BOTH, expand=True)
 
         # Painel de histórico
         self.frame_historico = tk.Frame(self.frame_principal, width=60)
         self.frame_historico.pack(side=tk.RIGHT, fill=tk.Y, padx=(10, 0))
-        
+
         self.canvas.bind("<Configure>", lambda e: self.desenhar_gradiente())
         self.canvas.bind("<Button-1>", self.copiar_clique)
 
+        # Atalhos Undo/Redo (Ctrl+Z / Ctrl+Y)
+        self.root.bind("<Control-z>", self.undo)
+        self.root.bind("<Control-y>", self.redo)
+        # Alternativa: Ctrl+Shift+Z também funciona como redo
+        self.root.bind("<Control-Shift-Z>", self.redo)
+        # Atalho Ctrl+S para salvar projeto rápido
+        self.root.bind("<Control-s>", self.salvar_projeto_rapido)
+
         self.root.protocol("WM_DELETE_WINDOW", self.ao_fechar)
         self.aplicar_tema()
+
+        # Cria a UI do painel de projetos
+        self.criar_ui_painel_projetos()
+
+        # Salva o estado inicial vazio
+        self.salvar_estado("Inicialização")
         self.gerar_lista_cores(self.cor_atual)
 
         # Mostra mensagem de boas-vindas com memória da última atividade
         self.mostrar_memoria_inicial()
+
+    # SISTEMA DE PROJETOS/PALETAS SALVAS
+    def carregar_projetos(self):
+        """Carrega projetos salvos do arquivo projetos.json"""
+        if os.path.exists(self.arquivo_projetos):
+            try:
+                with open(self.arquivo_projetos, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.projetos = data.get("projetos", {})
+            except Exception as e:
+                print(f"Erro ao carregar projetos: {e}")
+                self.projetos = {}
+
+    def salvar_projetos(self):
+        """Salva projetos no arquivo projetos.json"""
+        try:
+            data = {
+                "projetos": self.projetos,
+                "ultima_atualizacao": datetime.now().isoformat()
+            }
+            with open(self.arquivo_projetos, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"Erro ao salvar projetos: {e}")
+
+    def criar_ui_painel_projetos(self):
+        """Cria a UI do painel lateral de projetos com scrollbar"""
+        for w in self.frame_projetos.winfo_children():
+            w.destroy()
+
+        p = self.paletas[self.tema.get()]
+        self.frame_projetos.config(bg=p["window_bg"])
+
+        # Título
+        tk.Label(
+            self.frame_projetos,
+            text="📂 Projetos",
+            bg=p["window_bg"],
+            fg=p["text_fg"],
+            font=("Arial", 11, "bold")
+        ).pack(pady=(10, 5))
+
+        # Botão Novo Projeto
+        tk.Button(
+            self.frame_projetos,
+            text="➕ Novo Projeto",
+            command=self.criar_novo_projeto,
+            bg=p["special"],
+            fg="#ffffff",
+            relief=tk.FLAT,
+            width=18,
+            font=("Arial", 9, "bold")
+        ).pack(pady=(0, 8))
+
+        # Botão Gerenciar
+        tk.Button(
+            self.frame_projetos,
+            text="⚙️ Gerenciar",
+            command=self.abrir_gerenciar_projetos,
+            bg=p["btn"],
+            fg=p["text_fg"],
+            relief=tk.FLAT,
+            width=18
+        ).pack(pady=(0, 8))
+
+        # Separador
+        tk.Frame(self.frame_projetos, height=2, bg=p["btn"]).pack(fill=tk.X, padx=10, pady=5)
+
+        # Label para projetos recentes
+        tk.Label(
+            self.frame_projetos,
+            text="Recentes:",
+            bg=p["window_bg"],
+            fg=p["text_fg"],
+            font=("Arial", 9, "bold"),
+            anchor=tk.W
+        ).pack(fill=tk.X, padx=10, pady=(5, 0))
+
+        # Container com scrollbar para lista de projetos
+        self.container_projetos = tk.Frame(self.frame_projetos, bg=p["window_bg"])
+        self.container_projetos.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # Canvas para scrollbar
+        self.canvas_projetos = tk.Canvas(
+            self.container_projetos,
+            bg=p["window_bg"],
+            highlightthickness=0,
+            width=160
+        )
+        self.canvas_projetos.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Scrollbar
+        self.scrollbar_projetos = tk.Scrollbar(
+            self.container_projetos,
+            orient="vertical",
+            command=self.canvas_projetos.yview
+        )
+        self.scrollbar_projetos.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.canvas_projetos.configure(yscrollcommand=self.scrollbar_projetos.set)
+
+        # Frame interno para os projetos
+        self.scroll_projetos = tk.Frame(self.canvas_projetos, bg=p["window_bg"])
+        self.canvas_window = self.canvas_projetos.create_window(
+            (0, 0),
+            window=self.scroll_projetos,
+            anchor="nw",
+            width=160
+        )
+
+        # Bind para ajustar scroll region
+        self.scroll_projetos.bind(
+            "<Configure>",
+            lambda e: self.canvas_projetos.configure(scrollregion=self.canvas_projetos.bbox("all"))
+        )
+
+        # Atualiza a lista de projetos
+        self.atualizar_lista_projetos()
+
+    def atualizar_lista_projetos(self):
+        """Atualiza a lista de projetos no painel lateral com preview de cores"""
+        for w in self.scroll_projetos.winfo_children():
+            w.destroy()
+
+        p = self.paletas[self.tema.get()]
+
+        if not self.projetos:
+            tk.Label(
+                self.scroll_projetos,
+                text="Nenhum projeto salvo",
+                bg=p["window_bg"],
+                fg="#888888",
+                font=("Arial", 8, "italic")
+            ).pack(pady=20)
+            return
+
+        # Ordena projetos por data de modificação (mais recente primeiro)
+        projetos_ordenados = sorted(
+            self.projetos.items(),
+            key=lambda x: x[1].get("data_modificacao", ""),
+            reverse=True
+        )
+
+        for nome, dados in projetos_ordenados[:20]:  # Mostra até 20 projetos recentes
+            frame_item = tk.Frame(self.scroll_projetos, bg=p["window_bg"])
+            frame_item.pack(fill=tk.X, pady=3)
+
+            # Container principal do item
+            frame_conteudo = tk.Frame(frame_item, bg=p["window_bg"])
+            frame_conteudo.pack(fill=tk.X, expand=True)
+
+            # Preview das cores (primeiras 3)
+            frame_preview = tk.Frame(frame_conteudo, bg=p["window_bg"])
+            frame_preview.pack(fill=tk.X, pady=(0, 2))
+
+            cores = dados.get("cores_hex", [])[:3]
+            for cor in cores:
+                lbl = tk.Label(
+                    frame_preview,
+                    bg=cor,
+                    width=2,
+                    height=1,
+                    relief=tk.FLAT
+                )
+                lbl.pack(side=tk.LEFT, padx=1)
+
+            # Preenche com placeholders se tiver menos de 3 cores
+            for _ in range(3 - len(cores)):
+                lbl = tk.Label(
+                    frame_preview,
+                    bg="#cccccc",
+                    width=2,
+                    height=1,
+                    relief=tk.FLAT
+                )
+                lbl.pack(side=tk.LEFT, padx=1)
+
+            # Frame para botão e menu
+            frame_botoes = tk.Frame(frame_conteudo, bg=p["window_bg"])
+            frame_botoes.pack(fill=tk.X)
+
+            # Botão do projeto
+            is_ativo = nome == self.projeto_atual
+            btn_texto = nome[:16] + "..." if len(nome) > 16 else nome
+
+            btn = tk.Button(
+                frame_botoes,
+                text=btn_texto,
+                bg=p["special"] if is_ativo else p["btn"],
+                fg="#ffffff" if is_ativo else p["text_fg"],
+                relief=tk.FLAT,
+                command=lambda n=nome: self.carregar_projeto(n),
+                width=14,
+                anchor=tk.W,
+                font=("Arial", 8, "bold" if is_ativo else "normal")
+            )
+            btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+            # Botão de menu (3 pontos)
+            btn_menu = tk.Button(
+                frame_botoes,
+                text="⋮",
+                bg=p["window_bg"],
+                fg=p["text_fg"],
+                relief=tk.FLAT,
+                width=2,
+                font=("Arial", 10, "bold"),
+                command=lambda n=nome, b=btn: self.mostrar_menu_projeto(n, b)
+            )
+            btn_menu.pack(side=tk.RIGHT)
+
+            # Tooltip com info
+            num_cores = dados.get("num_cores", len(dados.get("cores_hex", [])))
+            data_mod = dados.get("data_modificacao", "")
+            if data_mod:
+                try:
+                    dt = datetime.fromisoformat(data_mod)
+                    data_str = dt.strftime("%d/%m/%y %H:%M")
+                except:
+                    data_str = data_mod[:10]
+            else:
+                data_str = "Sem data"
+
+            tooltip_text = f"{num_cores} cores • {data_str}"
+            # Adiciona tooltip simples
+            for widget in [frame_item, frame_conteudo]:
+                widget.bind("<Enter>", lambda e, t=tooltip_text: self.mostrar_tooltip(e, t))
+                widget.bind("<Leave>", lambda e: self.esconder_tooltip())
+
+    def mostrar_menu_projeto(self, nome_projeto, parent_widget):
+        """Mostra menu de contexto para um projeto"""
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label="Carregar", command=lambda: self.carregar_projeto(nome_projeto))
+        menu.add_command(label="Renomear", command=lambda: self.renomear_projeto(nome_projeto))
+        menu.add_separator()
+        menu.add_command(label="Excluir", command=lambda: self.excluir_projeto(nome_projeto))
+
+        # Posiciona o menu
+        x = parent_widget.winfo_rootx()
+        y = parent_widget.winfo_rooty() + parent_widget.winfo_height()
+        menu.post(x, y)
+
+    def criar_novo_projeto(self):
+        """Cria um novo projeto (limpa o canvas)"""
+        self.salvar_estado("Novo projeto")
+        self.cores_hex = []
+        self.cor_atual = "#0078d7"
+        self.projeto_atual = None
+        self.desenhar_gradiente()
+        self.atualizar_lista_projetos()
+        self.label_info.config(text="Novo projeto criado", fg="#2196f3")
+
+    def salvar_projeto_atual(self, nome=None):
+        """Salva o projeto atual"""
+        if not self.cores_hex:
+            messagebox.showinfo("Salvar Projeto", "Nenhuma cor para salvar.", parent=self.root)
+            return False
+
+        if nome is None:
+            nome = self.projeto_atual
+
+        if nome is None:
+            return False
+
+        # Salva o projeto
+        self.projetos[nome] = {
+            "cores_hex": self.cores_hex.copy(),
+            "cor_atual": self.cor_atual,
+            "data_criacao": self.projetos.get(nome, {}).get("data_criacao", datetime.now().isoformat()),
+            "data_modificacao": datetime.now().isoformat(),
+            "num_cores": len(self.cores_hex)
+        }
+
+        self.projeto_atual = nome
+        self.salvar_projetos()
+        self.atualizar_lista_projetos()
+        return True
+
+    def abrir_salvar_projeto(self):
+        """Abre diálogo para salvar projeto"""
+        win = tk.Toplevel(self.root)
+        win.title("Salvar Projeto")
+        win.geometry("350x180")
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        win.transient(self.root)
+        win.grab_set()
+
+        p = self.paletas[self.tema.get()]
+        win.config(bg=p["window_bg"])
+
+        tk.Label(
+            win,
+            text="Nome do Projeto:",
+            bg=p["window_bg"],
+            fg=p["text_fg"],
+            font=("Arial", 10, "bold")
+        ).pack(pady=(20, 10))
+
+        nome_var = tk.StringVar(value=self.projeto_atual if self.projeto_atual else f"Projeto {len(self.projetos) + 1}")
+        entry = tk.Entry(win, textvariable=nome_var, width=30, font=("Arial", 11))
+        entry.pack(pady=5)
+        entry.select_range(0, tk.END)
+        entry.focus()
+
+        def salvar():
+            nome = nome_var.get().strip()
+            if not nome:
+                messagebox.showwarning("Aviso", "Digite um nome para o projeto.", parent=win)
+                return
+
+            if nome in self.projetos and nome != self.projeto_atual:
+                if not messagebox.askyesno(
+                    "Substituir?",
+                    f'Já existe um projeto "{nome}". Deseja substituir?',
+                    parent=win
+                ):
+                    return
+
+            if self.salvar_projeto_atual(nome):
+                self.label_info.config(text=f"Projeto salvo: {nome}", fg="#2e7d32")
+            win.destroy()
+
+        def cancelar():
+            win.destroy()
+
+        frame_botoes = tk.Frame(win, bg=p["window_bg"])
+        frame_botoes.pack(pady=20)
+
+        tk.Button(
+            frame_botoes,
+            text="Cancelar",
+            command=cancelar,
+            bg=p["btn"],
+            fg=p["text_fg"],
+            width=10
+        ).pack(side=tk.LEFT, padx=5)
+
+        tk.Button(
+            frame_botoes,
+            text="Salvar",
+            command=salvar,
+            bg="#4caf50",
+            fg="white",
+            width=10,
+            font=("Arial", 9, "bold")
+        ).pack(side=tk.LEFT, padx=5)
+
+        entry.bind("<Return>", lambda e: salvar())
+
+    def abrir_gerenciar_projetos(self):
+        """Abre janela de gerenciamento de projetos"""
+        win = tk.Toplevel(self.root)
+        win.title("Gerenciar Projetos")
+        win.geometry("500x450")
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        p = self.paletas[self.tema.get()]
+        win.config(bg=p["window_bg"])
+
+        tk.Label(
+            win,
+            text="📂 Meus Projetos",
+            bg=p["window_bg"],
+            fg=p["text_fg"],
+            font=("Arial", 14, "bold")
+        ).pack(pady=(20, 10))
+
+        # Container com scrollbar
+        frame_container = tk.Frame(win, bg=p["window_bg"])
+        frame_container.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+
+        canvas = tk.Canvas(frame_container, bg=p["window_bg"], highlightthickness=0)
+        scrollbar = tk.Scrollbar(frame_container, orient="vertical", command=canvas.yview)
+        scroll_frame = tk.Frame(canvas, bg=p["window_bg"])
+
+        scroll_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        def atualizar_lista():
+            for w in scroll_frame.winfo_children():
+                w.destroy()
+
+            if not self.projetos:
+                tk.Label(
+                    scroll_frame,
+                    text="Nenhum projeto salvo",
+                    bg=p["window_bg"],
+                    fg="#888888",
+                    font=("Arial", 10)
+                ).pack(pady=50)
+                return
+
+            # Ordena por data de modificação
+            projetos_ordenados = sorted(
+                self.projetos.items(),
+                key=lambda x: x[1].get("data_modificacao", ""),
+                reverse=True
+            )
+
+            for nome, dados in projetos_ordenados:
+                frame_proj = tk.Frame(scroll_frame, bg=p["canvas"], padx=10, pady=8)
+                frame_proj.pack(fill=tk.X, pady=3)
+
+                # Info do projeto
+                frame_info = tk.Frame(frame_proj, bg=p["canvas"])
+                frame_info.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+                tk.Label(
+                    frame_info,
+                    text=nome,
+                    bg=p["canvas"],
+                    fg=p["text_fg"],
+                    font=("Arial", 10, "bold"),
+                    anchor=tk.W
+                ).pack(fill=tk.X)
+
+                num_cores = dados.get("num_cores", len(dados.get("cores_hex", [])))
+                data_mod = dados.get("data_modificacao", "")
+                if data_mod:
+                    try:
+                        dt = datetime.fromisoformat(data_mod)
+                        data_str = dt.strftime("%d/%m/%Y %H:%M")
+                    except:
+                        data_str = data_mod
+                else:
+                    data_str = "Sem data"
+
+                tk.Label(
+                    frame_info,
+                    text=f"{num_cores} cores • {data_str}",
+                    bg=p["canvas"],
+                    fg="#888888",
+                    font=("Arial", 8),
+                    anchor=tk.W
+                ).pack(fill=tk.X)
+
+                # Preview das cores (primeiras 5)
+                frame_cores = tk.Frame(frame_info, bg=p["canvas"])
+                frame_cores.pack(fill=tk.X, pady=(5, 0))
+
+                cores = dados.get("cores_hex", [])[:5]
+                for cor in cores:
+                    lbl = tk.Label(
+                        frame_cores,
+                        bg=cor,
+                        width=2,
+                        height=1,
+                        relief=tk.FLAT
+                    )
+                    lbl.pack(side=tk.LEFT, padx=1)
+
+                # Botões de ação
+                frame_acoes = tk.Frame(frame_proj, bg=p["canvas"])
+                frame_acoes.pack(side=tk.RIGHT)
+
+                tk.Button(
+                    frame_acoes,
+                    text="Carregar",
+                    command=lambda n=nome: [self.carregar_projeto(n), win.destroy()],
+                    bg=p["special"],
+                    fg="white",
+                    relief=tk.FLAT,
+                    width=8
+                ).pack(side=tk.LEFT, padx=2)
+
+                tk.Button(
+                    frame_acoes,
+                    text="Excluir",
+                    command=lambda n=nome, f=frame_proj: confirmar_excluir(n, f),
+                    bg="#e57373",
+                    fg="white",
+                    relief=tk.FLAT,
+                    width=8
+                ).pack(side=tk.LEFT, padx=2)
+
+        def confirmar_excluir(nome, widget):
+            if messagebox.askyesno(
+                "Confirmar",
+                f'Deseja excluir o projeto "{nome}"?',
+                parent=win
+            ):
+                self.excluir_projeto(nome)
+                widget.destroy()
+                if not self.projetos:
+                    atualizar_lista()
+
+        atualizar_lista()
+
+        # Botão fechar
+        tk.Button(
+            win,
+            text="Fechar",
+            command=win.destroy,
+            bg=p["btn"],
+            fg=p["text_fg"],
+            width=12
+        ).pack(pady=15)
+
+    def carregar_projeto(self, nome):
+        """Carrega um projeto salvo"""
+        if nome not in self.projetos:
+            return
+
+        dados = self.projetos[nome]
+
+        self.salvar_estado(f"Carregar projeto: {nome}")
+        self.cores_hex = dados.get("cores_hex", [])
+        self.cor_atual = dados.get("cor_atual", "#0078d7")
+        self.projeto_atual = nome
+
+        self.desenhar_gradiente()
+        self.atualizar_label_info()
+        self.atualizar_lista_projetos()
+
+        self.label_info.config(text=f"Projeto carregado: {nome}", fg="#2196f3")
+
+    def renomear_projeto(self, nome_antigo):
+        """Renomeia um projeto"""
+        if nome_antigo not in self.projetos:
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("Renomear Projeto")
+        win.geometry("300x120")
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        win.transient(self.root)
+        win.grab_set()
+
+        p = self.paletas[self.tema.get()]
+        win.config(bg=p["window_bg"])
+
+        tk.Label(
+            win,
+            text="Novo nome:",
+            bg=p["window_bg"],
+            fg=p["text_fg"]
+        ).pack(pady=(15, 5))
+
+        novo_nome_var = tk.StringVar(value=nome_antigo)
+        entry = tk.Entry(win, textvariable=novo_nome_var, width=25)
+        entry.pack()
+        entry.select_range(0, tk.END)
+        entry.focus()
+
+        def confirmar():
+            novo_nome = novo_nome_var.get().strip()
+            if not novo_nome:
+                return
+            if novo_nome in self.projetos and novo_nome != nome_antigo:
+                messagebox.showwarning("Aviso", "Já existe um projeto com este nome.", parent=win)
+                return
+
+            # Renomeia
+            self.projetos[novo_nome] = self.projetos.pop(nome_antigo)
+            if self.projeto_atual == nome_antigo:
+                self.projeto_atual = novo_nome
+
+            self.salvar_projetos()
+            self.atualizar_lista_projetos()
+            win.destroy()
+
+        def cancelar():
+            win.destroy()
+
+        frame = tk.Frame(win, bg=p["window_bg"])
+        frame.pack(pady=15)
+
+        tk.Button(frame, text="Cancelar", command=cancelar).pack(side=tk.LEFT, padx=5)
+        tk.Button(frame, text="Renomear", command=confirmar, bg="#2196f3", fg="white").pack(side=tk.LEFT, padx=5)
+
+        entry.bind("<Return>", lambda e: confirmar())
+
+    def excluir_projeto(self, nome):
+        """Exclui um projeto"""
+        if nome in self.projetos:
+            del self.projetos[nome]
+            if self.projeto_atual == nome:
+                self.projeto_atual = None
+            self.salvar_projetos()
+            self.atualizar_lista_projetos()
+            self.label_info.config(text=f"Projeto excluído: {nome}", fg="#ff9800")
+
+    # Tooltip para projetos
+    def mostrar_tooltip(self, event, texto):
+        """Mostra um tooltip temporário"""
+        self.tooltip = tk.Toplevel(self.root)
+        self.tooltip.wm_overrideredirect(True)
+        self.tooltip.wm_geometry(f"+{event.x_root + 10}+{event.y_root + 10}")
+
+        p = self.paletas[self.tema.get()]
+        lbl = tk.Label(
+            self.tooltip,
+            text=texto,
+            bg="#333333",
+            fg="#ffffff",
+            font=("Arial", 8),
+            padx=8,
+            pady=4
+        )
+        lbl.pack()
+
+    def esconder_tooltip(self):
+        """Esconde o tooltip"""
+        if hasattr(self, 'tooltip') and self.tooltip:
+            try:
+                self.tooltip.destroy()
+            except:
+                pass
+            self.tooltip = None
+
+    def salvar_projeto_rapido(self, event=None):
+        """Salva o projeto atual rapidamente (Ctrl+S)"""
+        if not self.cores_hex:
+            messagebox.showinfo("Salvar Projeto", "Nenhuma cor para salvar.", parent=self.root)
+            return "break"
+
+        # Se já tem um projeto carregado, salva nele
+        if self.projeto_atual:
+            if self.salvar_projeto_atual(self.projeto_atual):
+                self.label_info.config(text=f"✓ Projeto salvo: {self.projeto_atual}", fg="#2e7d32")
+            return "break"
+
+        # Se não tem projeto, abre o diálogo
+        self.abrir_salvar_projeto()
+        return "break"
 
     # SALVAMENTO
     def salvar_configuracoes(self):
@@ -366,6 +1043,7 @@ class AppCores:
             self.root.after_cancel(self._debounce_timer)
         self.ultima_atividade = f"Trabalhando com a paleta base {self.cor_atual}"
         self.salvar_configuracoes()
+        self.salvar_projetos()
         self.root.destroy()
 
     def mostrar_memoria_inicial(self):
@@ -380,6 +1058,91 @@ class AppCores:
                 text=f"Color Lab Pro v4.6 | Base: {self.cor_atual}",
                 fg=self.paletas[self.tema.get()]["text_fg"]
             ))
+
+    # ── SISTEMA UNDO/REDO ────────────────────────────────────────────────────
+
+    def salvar_estado(self, descricao="Ação"):
+        """Salva o estado atual (cores_hex + cor_atual) na pilha de undo."""
+        if self._salvando_estado:
+            return
+
+        self._salvando_estado = True
+
+        # Cria uma cópia profunda do estado atual
+        estado = {
+            "cores_hex": self.cores_hex.copy() if self.cores_hex else [],
+            "cor_atual": self.cor_atual,
+            "descricao": descricao
+        }
+
+        # Adiciona à pilha de undo
+        self._undo_stack.append(estado)
+
+        # Limita o tamanho da pilha
+        if len(self._undo_stack) > self._max_undo_states:
+            self._undo_stack.pop(0)
+
+        # Limpa a pilha de redo quando uma nova ação é realizada
+        self._redo_stack.clear()
+
+        self._salvando_estado = False
+
+    def undo(self, event=None):
+        """Desfaz a última ação (Ctrl+Z)."""
+        if not self._undo_stack:
+            self.label_info.config(text="Nada para desfazer", fg="#ff9800")
+            return "break"
+
+        # Salva o estado atual na pilha de redo
+        estado_atual = {
+            "cores_hex": self.cores_hex.copy() if self.cores_hex else [],
+            "cor_atual": self.cor_atual,
+            "descricao": "Estado atual"
+        }
+        self._redo_stack.append(estado_atual)
+
+        # Restaura o estado anterior
+        estado_anterior = self._undo_stack.pop()
+        self._restaurar_estado(estado_anterior)
+
+        descricao = estado_anterior.get("descricao", "Ação")
+        self.label_info.config(text=f"Desfeito: {descricao} ({len(self._undo_stack)} disponíveis)", fg="#2196f3")
+        return "break"
+
+    def redo(self, event=None):
+        """Refaz a última ação desfeita (Ctrl+Y)."""
+        if not self._redo_stack:
+            self.label_info.config(text="Nada para refazer", fg="#ff9800")
+            return "break"
+
+        # Salva o estado atual na pilha de undo
+        estado_atual = {
+            "cores_hex": self.cores_hex.copy() if self.cores_hex else [],
+            "cor_atual": self.cor_atual,
+            "descricao": "Estado atual"
+        }
+        self._undo_stack.append(estado_atual)
+
+        # Restaura o estado do redo
+        estado_redo = self._redo_stack.pop()
+        self._restaurar_estado(estado_redo)
+
+        descricao = estado_redo.get("descricao", "Ação")
+        self.label_info.config(text=f"Refeito: {descricao} ({len(self._redo_stack)} disponíveis)", fg="#4caf50")
+        return "break"
+
+    def _restaurar_estado(self, estado):
+        """Restaura o estado a partir de um dicionário."""
+        self._salvando_estado = True
+
+        self.cores_hex = estado["cores_hex"].copy() if estado["cores_hex"] else []
+        self.cor_atual = estado["cor_atual"]
+
+        # Atualiza a UI
+        self.desenhar_gradiente()
+        self.atualizar_label_info()
+
+        self._salvando_estado = False
 
     # NAVEGAÇÃO CONFIGS
     def abrir_configuracoes(self):
@@ -610,6 +1373,7 @@ class AppCores:
         def usar_no_canvas():
             cores = lch_cache.get("cores", [])
             if cores:
+                self.salvar_estado(f"Harmonia: {harmonia_var.get()}")
                 self.cores_hex = cores
                 self.cor_atual = cores[0]
                 self.adicionar_historico(cores[0])
@@ -625,6 +1389,7 @@ class AppCores:
             cores = lch_cache.get("cores", [])
             if not cores:
                 return
+            self.salvar_estado(f"Gradiente harmônico: {harmonia_var.get()}")
             resultado = []
             for i in range(len(cores) - 1):
                 lab_a = xyz_to_lab(rgb_to_xyz(hex_to_rgb(cores[i])))
@@ -1104,7 +1869,8 @@ class AppCores:
         def usar_cor_t():
             cor = _cache.get("cor_t")
             if cor:
-                self.gerar_lista_cores(cor)
+                self.salvar_estado(f"Mixer: cor t={t_var.get():.2f}")
+                self.gerar_lista_cores(cor, salvar_estado_undo=False)
                 self.label_info.config(
                     text=f"Mixer → {cor.upper()}  t={t_var.get():.2f}  {modo_var.get()}",
                     fg="#6a1b9a")
@@ -1113,6 +1879,7 @@ class AppCores:
         def usar_escala():
             cores = _cache.get("escala", [])
             if cores:
+                self.salvar_estado(f"Mixer: escala {modo_var.get()}")
                 self.cores_hex = cores
                 self.cor_atual = cores[len(cores) // 2]
                 self.adicionar_historico(self.cor_atual)
@@ -1129,6 +1896,7 @@ class AppCores:
                 hex_to_rgb(ha); hex_to_rgb(hb)
             except Exception:
                 return
+            self.salvar_estado(f"Mixer: gradiente {ha} → {hb}")
             lab_a = xyz_to_lab(rgb_to_xyz(hex_to_rgb(ha)))
             lab_b = xyz_to_lab(rgb_to_xyz(hex_to_rgb(hb)))
             dist  = delta_e_cie76(lab_a, lab_b)
@@ -1187,7 +1955,7 @@ class AppCores:
             nx = x + 30 if x + lupa_size + 30 < larg_t else x - lupa_size - 30; ny = y + 30 if y + lupa_size + 30 < alt_t else y - lupa_size - 30
             canvas_ov.create_image(nx, ny, anchor="nw", image=img_lupa, tag="lupa_dinamica"); canvas_ov.create_oval(nx, ny, nx+lupa_size, ny+lupa_size, outline="black", width=2, tag="lupa_dinamica"); canvas_ov.img_ref = img_lupa
         def capturar(event):
-            c = rgb_to_hex(print_tela.getpixel((event.x, event.y))); overlay.destroy(); self.root.deiconify(); self.gerar_lista_cores(c); self.salvar_configuracoes()
+            c = rgb_to_hex(print_tela.getpixel((event.x, event.y))); overlay.destroy(); self.root.deiconify(); self.gerar_lista_cores(c, salvar_estado_undo=True); self.salvar_configuracoes()
         canvas_ov.bind("<Motion>", atualizar_lupa); canvas_ov.bind("<Button-1>", capturar)
         overlay.bind("<Escape>", lambda e:[overlay.destroy(), self.root.deiconify()]); overlay.img_ref = img_bg
 
@@ -1197,8 +1965,14 @@ class AppCores:
         self.label_info.config(bg=p["window_bg"])
         self.frame_principal.config(bg=p["window_bg"])
         self.frame_historico.config(bg=p["window_bg"])
+
+        # Atualiza botões do menu
         for w in self.frame_menu.winfo_children():
             if isinstance(w, tk.Button): w.config(bg=p["btn"] if w.cget("text") != "🧪 Conta-Gotas" else p["special"], fg=p["text_fg"])
+
+        # Atualiza painel de projetos
+        self.criar_ui_painel_projetos()
+
         if self.config_win and tk.Toplevel.winfo_exists(self.config_win):
             self.config_win.config(bg=p["window_bg"]); self.config_container.config(bg=p["window_bg"])
             def upd(parent):
@@ -1310,10 +2084,14 @@ class AppCores:
         tk.Label(self.frame_historico, text="Recentes", bg=p["window_bg"], fg=p["text_fg"], font=("Arial", 9, "bold")).pack(pady=5)
         for cor in self.historico_cores:
             btn = tk.Button(self.frame_historico, bg=cor, width=3, height=1, relief=tk.FLAT, cursor="hand2",
-                           command=lambda c=cor: self.gerar_lista_cores(c))
+                           command=lambda c=cor: [self.salvar_estado(f"Selecionar do histórico: {c}"), self.gerar_lista_cores(c, salvar_estado_undo=False)])
             btn.pack(pady=2)
 
-    def gerar_lista_cores(self, hex_base):
+    def gerar_lista_cores(self, hex_base, salvar_estado_undo=True):
+        # Salva estado anterior se necessário
+        if salvar_estado_undo:
+            self.salvar_estado(f"Gerar paleta de {hex_base}")
+
         self.cor_atual = hex_base
         self.adicionar_historico(hex_base)
         self.atualizar_label_info()
@@ -1334,11 +2112,15 @@ class AppCores:
 
     def ferramenta_digitar(self):
         cor = simpledialog.askstring("Input", "HEX:", parent=self.root)
-        if cor: self.gerar_lista_cores('#' + cor.lstrip('#'))
+        if cor:
+            self.salvar_estado("Inserir HEX manualmente")
+            self.gerar_lista_cores('#' + cor.lstrip('#'), salvar_estado_undo=False)
 
     def ferramenta_seletor(self):
         cor = colorchooser.askcolor(title="Seletor")[1]
-        if cor: self.gerar_lista_cores(cor)
+        if cor:
+            self.salvar_estado("Selecionar cor")
+            self.gerar_lista_cores(cor, salvar_estado_undo=False)
 
     def exportar_paleta(self):
         if not self.cores_hex:
@@ -1349,25 +2131,90 @@ class AppCores:
             ("Adobe ASE (*.ase)", "*.ase"),
             ("GIMP Palette (*.gpl)", "*.gpl"),
             ("CSS (*.css)", "*.css"),
+            ("SCSS Map (*.scss)", "*.scss"),
+            ("Tailwind Config (*.config.js)", "*.config.js"),
             ("JSON (*.json)", "*.json"),
+            ("W3C Design Tokens (*.tokens.json)", "*.tokens.json"),
             ("Texto (*.txt)", "*.txt"),
             ("PNG Image (*.png)", "*.png"),
             ("JPEG Image (*.jpg)", "*.jpg"),
             ("Todos (*)", "*.*")
         ]
-        arquivo = filedialog.asksaveasfilename(defaultextension=".ase", filetypes=tipos, title="Exportar Paleta")
+        arquivo = filedialog.asksaveasfilename(filetypes=tipos, title="Exportar Paleta")
         if not arquivo: return
-        try:
+
+        # Normaliza separadores de caminho e detecta extensão
+        arquivo = os.path.normpath(arquivo)
+        arquivo_lower = arquivo.lower()
+
+        # Detecta extensão especial .config.js primeiro (antes do splitext)
+        if arquivo_lower.endswith(".config.js"):
+            ext = ".config.js"
+        elif arquivo_lower.endswith(".tokens.json"):
+            ext = ".tokens.json"
+        else:
+            # Se não tiver extensão reconhecida, assume baseado na extensão atual
             ext = os.path.splitext(arquivo)[1].lower()
+            # Fallback: se não tiver extensão, adiciona .ase
+            if not ext:
+                ext = ".ase"
+                arquivo = arquivo + ext
+
+        try:
             if ext == ".css":
                 with open(arquivo, "w") as f:
                     f.write(":root {\n")
                     for i, c in enumerate(self.cores_hex):
                         f.write(f"  --color-{i+1}: {c};\n")
                     f.write("}\n")
+            elif ext == ".scss":
+                with open(arquivo, "w") as f:
+                    f.write("// Color Lab Pro - SCSS Color Map\n\n")
+                    f.write("$colors: (\n")
+                    for i, c in enumerate(self.cores_hex):
+                        f.write(f'  "color-{i+1}": {c},\n')
+                    f.write(");\n\n")
+                    for i, c in enumerate(self.cores_hex):
+                        f.write(f"$color-{i+1}: {c};\n")
+            elif ext == ".config.js":
+                with open(arquivo, "w") as f:
+                    f.write("// Color Lab Pro - Tailwind Config\n")
+                    f.write("// Para usar: const colors = require('./{0}').colors;\n".format(os.path.basename(arquivo)))
+                    f.write("// Ou importe no tailwind.config.js: const colors = require('./{0}');\n\n".format(os.path.basename(arquivo)))
+                    f.write("module.exports = {\n")
+                    f.write("  colors: {\n")
+                    for i, c in enumerate(self.cores_hex):
+                        f.write(f'    "color-{i+1}": "{c}",\n')
+                    f.write("  },\n")
+                    f.write("  theme: {\n")
+                    f.write("    extend: {\n")
+                    f.write("      colors: {\n")
+                    for i, c in enumerate(self.cores_hex):
+                        nome_base = os.path.splitext(os.path.basename(arquivo))[0].replace('.config', '').replace('.', '-')
+                        f.write(f'        "{nome_base}-{i+1}": "{c}",\n')
+                    f.write("      },\n")
+                    f.write("    },\n")
+                    f.write("  },\n")
+                    f.write("};\n")
             elif ext == ".json":
                 with open(arquivo, "w") as f:
                     json.dump({"colors": self.cores_hex, "base": self.cor_atual}, f, indent=2)
+            elif ext == ".tokens.json":
+                dt_now = datetime.now().isoformat()
+                tokens = {
+                    "$schema": "https://design-tokens.github.io/community-group/format/dtcg-format.format.json",
+                    "$version": "1.0.0",
+                    "$timestamp": dt_now,
+                    "colors": {}
+                }
+                for i, c in enumerate(self.cores_hex):
+                    tokens["colors"][f"color-{i+1}"] = {
+                        "$type": "color",
+                        "$value": c,
+                        "$description": f"Cor {i+1} gerada a partir de {self.cor_atual}"
+                    }
+                with open(arquivo, "w") as f:
+                    json.dump(tokens, f, indent=2)
             elif ext == ".txt":
                 with open(arquivo, "w") as f:
                     for c in self.cores_hex:
@@ -1471,6 +2318,7 @@ class AppCores:
                 cores_dominantes = self.extrair_cores_quantizacao(img, num_cores)
 
             if cores_dominantes:
+                self.salvar_estado(f"Importar: {os.path.basename(arquivo)}")
                 self.cores_hex = cores_dominantes
                 self.cor_atual = cores_dominantes[len(cores_dominantes)//2]  # Cor do meio
                 self.desenhar_gradiente()
