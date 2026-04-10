@@ -778,21 +778,6 @@ class AppCores:
                     anchor=tk.W
                 ).pack(fill=tk.X)
 
-                # Preview das cores (primeiras 5)
-                frame_cores = tk.Frame(frame_info, bg=p["canvas"])
-                frame_cores.pack(fill=tk.X, pady=(5, 0))
-
-                cores = dados.get("cores_hex", [])[:5]
-                for cor in cores:
-                    lbl = tk.Label(
-                        frame_cores,
-                        bg=cor,
-                        width=2,
-                        height=1,
-                        relief=tk.FLAT
-                    )
-                    lbl.pack(side=tk.LEFT, padx=1)
-
                 # Botões de ação
                 frame_acoes = tk.Frame(frame_proj, bg=p["canvas"])
                 frame_acoes.pack(side=tk.RIGHT)
